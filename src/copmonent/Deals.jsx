@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react'
 import { getAuthHeader, clearToken } from '../utils/auth'
 
@@ -11,11 +12,13 @@ const Deals = () => {
   const [apiToken, setApiToken] = useState('')
   const [formData, setFormData] = useState({
     client_id: '',
+    deal_owner_id: '',
     deal_name: '',
-    deal_value: '',
-    deal_status: '',
-    deal_stage: '',
-    expected_close_date: '',
+    software_type: '',
+    amount: '',
+    number_of_devices: '',
+    start_date: '',
+    end_date: '',
     notes: ''
   })
 
@@ -123,8 +126,17 @@ const Deals = () => {
 
   const saveNewDeal = async () => {
     // Validate required fields
-    if (!formData.client_id || !formData.deal_name) {
-      setError('Client ID and Deal Name are required.')
+    if (
+      !formData.client_id ||
+      !formData.deal_owner_id ||
+      !formData.deal_name ||
+      !formData.software_type ||
+      !formData.amount ||
+      !formData.number_of_devices ||
+      !formData.start_date ||
+      !formData.end_date
+    ) {
+      setError('Please fill in all required deal fields.')
       return
     }
 
@@ -133,14 +145,20 @@ const Deals = () => {
     setSaving(true)
 
     const payload = {
-      id: Date.now(), // Generate a temporary ID for localStorage
-      client_id: formData.client_id,
+      client_id: Number(formData.client_id),
+      deal_owner_id: Number(formData.deal_owner_id),
       deal_name: formData.deal_name,
-      deal_value: formData.deal_value ? parseFloat(formData.deal_value) : null,
-      deal_status: formData.deal_status || 'Open',
-      deal_stage: formData.deal_stage || '',
-      expected_close_date: formData.expected_close_date || null,
-      notes: formData.notes || '',
+      software_type: formData.software_type,
+      amount: Number(formData.amount),
+      number_of_devices: Number(formData.number_of_devices),
+      start_date: formData.start_date,
+      end_date: formData.end_date,
+      notes: formData.notes || ''
+    }
+
+    const localPayload = {
+      ...payload,
+      id: Date.now(),
       created_date: new Date().toISOString()
     }
 
@@ -150,6 +168,12 @@ const Deals = () => {
         Accept: 'application/json',
         'Content-Type': 'application/json',
         ...tokenHeader
+      }
+
+      if (!headers.Authorization) {
+        setError('No authorization token found. Please log in before creating a deal.')
+        setSaving(false)
+        return
       }
 
       const endpoint = 'https://asg-crm-production.up.railway.app/deals'
@@ -188,7 +212,7 @@ const Deals = () => {
           // Fallback to localStorage
           const existingDeals = localStorage.getItem('deals_local_storage')
           const dealList = existingDeals ? JSON.parse(existingDeals) : []
-          const updatedList = [payload, ...dealList]
+          const updatedList = [localPayload, ...dealList]
           localStorage.setItem('deals_local_storage', JSON.stringify(updatedList))
           
           setDeals(updatedList)
@@ -196,11 +220,13 @@ const Deals = () => {
           setError('⚠️ Saving locally - API access denied (403). Will sync when restored.')
           setFormData({
             client_id: '',
+            deal_owner_id: '',
             deal_name: '',
-            deal_value: '',
-            deal_status: '',
-            deal_stage: '',
-            expected_close_date: '',
+            software_type: '',
+            amount: '',
+            number_of_devices: '',
+            start_date: '',
+            end_date: '',
             notes: ''
           })
           setSaving(false)
@@ -210,40 +236,52 @@ const Deals = () => {
         throw new Error(msg)
       }
 
-      const newDeal = body ? JSON.parse(body) : payload
+      const newDeal = body ? JSON.parse(body) : localPayload
       setDeals((prev) => [newDeal, ...prev])
       // Clear localStorage after successful API save
       localStorage.removeItem('deals_local_storage')
       setSuccess('✅ Deal created successfully!')
       setFormData({
         client_id: '',
+        deal_owner_id: '',
         deal_name: '',
-        deal_value: '',
-        deal_status: '',
-        deal_stage: '',
-        expected_close_date: '',
+        software_type: '',
+        amount: '',
+        number_of_devices: '',
+        start_date: '',
+        end_date: '',
         notes: ''
       })
     } catch (err) {
       console.error('Save error:', err)
-      // Fallback to localStorage on any error
-      const existingDeals = localStorage.getItem('deals_local_storage')
-      const dealList = existingDeals ? JSON.parse(existingDeals) : []
-      const updatedList = [payload, ...dealList]
-      localStorage.setItem('deals_local_storage', JSON.stringify(updatedList))
-      
-      setDeals(updatedList)
-      setSuccess('✅ Deal saved to local storage')
-      setError(`Unable to reach API: ${err.message || 'Unknown error'}. Data saved locally.`)
-      setFormData({
-        client_id: '',
-        deal_name: '',
-        deal_value: '',
-        deal_status: '',
-        deal_stage: '',
-        expected_close_date: '',
-        notes: ''
-      })
+      const isNetworkError =
+        err?.message?.includes('Failed to fetch') ||
+        err?.message?.includes('NetworkError') ||
+        err?.message?.includes('network')
+
+      if (isNetworkError) {
+        const existingDeals = localStorage.getItem('deals_local_storage')
+        const dealList = existingDeals ? JSON.parse(existingDeals) : []
+        const updatedList = [localPayload, ...dealList]
+        localStorage.setItem('deals_local_storage', JSON.stringify(updatedList))
+
+        setDeals(updatedList)
+        setSuccess('✅ Deal saved to local storage')
+        setError(`Unable to reach API: ${err.message || 'Unknown network error'}. Data saved locally.`)
+        setFormData({
+          client_id: '',
+          deal_owner_id: '',
+          deal_name: '',
+          software_type: '',
+          amount: '',
+          number_of_devices: '',
+          start_date: '',
+          end_date: '',
+          notes: ''
+        })
+      } else {
+        setError(`Unable to save deal: ${err.message || 'Unknown error'}.`)
+      }
     } finally {
       setSaving(false)
     }
@@ -308,67 +346,98 @@ const Deals = () => {
             </div>
 
             <div>
-              <label htmlFor="deal_value" className="block text-sm font-semibold text-gray-700 mb-2">
-                Deal Value
-              </label>
-              <input
-                type="number"
-                id="deal_value"
-                name="deal_value"
-                value={formData.deal_value}
-                onChange={handleFormChange}
-                placeholder="Enter deal value"
-                step="0.01"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="deal_status" className="block text-sm font-semibold text-gray-700 mb-2">
-                Deal Status
-              </label>
-              <select
-                id="deal_status"
-                name="deal_status"
-                value={formData.deal_status}
-                onChange={handleFormChange}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
-              >
-                <option value="">Select status</option>
-                <option value="Open">Open</option>
-                <option value="In Progress">In Progress</option>
-                <option value="Won">Won</option>
-                <option value="Lost">Lost</option>
-                <option value="On Hold">On Hold</option>
-              </select>
-            </div>
-
-            <div>
-              <label htmlFor="deal_stage" className="block text-sm font-semibold text-gray-700 mb-2">
-                Deal Stage
+              <label htmlFor="deal_owner_id" className="block text-sm font-semibold text-gray-700 mb-2">
+                Deal Owner ID <span className="text-red-500">*</span>
               </label>
               <input
                 type="text"
-                id="deal_stage"
-                name="deal_stage"
-                value={formData.deal_stage}
+                id="deal_owner_id"
+                name="deal_owner_id"
+                value={formData.deal_owner_id}
                 onChange={handleFormChange}
-                placeholder="Enter deal stage"
+                placeholder="Enter deal owner ID"
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                required
               />
             </div>
 
             <div>
-              <label htmlFor="expected_close_date" className="block text-sm font-semibold text-gray-700 mb-2">
-                Expected Close Date
+              <label htmlFor="software_type" className="block text-sm font-semibold text-gray-700 mb-2">
+                Software Type <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                id="software_type"
+                name="software_type"
+                value={formData.software_type}
+                onChange={handleFormChange}
+                placeholder="Enter software type"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="amount" className="block text-sm font-semibold text-gray-700 mb-2">
+                Amount <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="number"
+                id="amount"
+                name="amount"
+                value={formData.amount}
+                onChange={handleFormChange}
+                placeholder="Enter amount"
+                step="0.01"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="number_of_devices" className="block text-sm font-semibold text-gray-700 mb-2">
+                Number of Devices <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="number"
+                id="number_of_devices"
+                name="number_of_devices"
+                value={formData.number_of_devices}
+                onChange={handleFormChange}
+                placeholder="Enter number of devices"
+                min="0"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="start_date" className="block text-sm font-semibold text-gray-700 mb-2">
+                Start Date <span className="text-red-500">*</span>
               </label>
               <input
                 type="date"
-                id="expected_close_date"
-                name="expected_close_date"
-                value={formData.expected_close_date}
+                id="start_date"
+                name="start_date"
+                value={formData.start_date}
                 onChange={handleFormChange}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="end_date" className="block text-sm font-semibold text-gray-700 mb-2">
+                End Date <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="date"
+                id="end_date"
+                name="end_date"
+                value={formData.end_date}
+                onChange={handleFormChange}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                required
               />
             </div>
           </div>

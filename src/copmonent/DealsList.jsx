@@ -13,7 +13,7 @@ const DealsList = () => {
   const [searchLoading, setSearchLoading] = useState(false)
   const [deletingDealId, setDeletingDealId] = useState(null)
   const [editingDealId, setEditingDealId] = useState(null)
-  const [editForm, setEditForm] = useState({ deal_status: '', deal_stage: '', notes: '', deal_value: '' })
+  const [editForm, setEditForm] = useState({ notes: '', start_date: '', end_date: '' })
 
   const getDealId = (deal) => {
     if (!deal) return null
@@ -21,6 +21,7 @@ const DealsList = () => {
     if (rawId === undefined || rawId === null) return null
     const normalized = typeof rawId === 'string' ? rawId.trim() : String(rawId)
     if (normalized === '' || normalized === '0') return null
+    if (/^\{.+\}$/.test(normalized)) return null
     return normalized
   }
 
@@ -120,28 +121,6 @@ const DealsList = () => {
     setSuccess('')
     setSearchLoading(true)
 
-    const localSearch = (q) => {
-      const normalizedQuery = q.trim().toLowerCase()
-      const results = deals.filter((deal) => {
-        const id = (deal.id ?? deal.deal_id ?? '').toString().toLowerCase()
-        const clientId = (deal.client_id ?? deal.clientId ?? '').toString().toLowerCase()
-        const text = [
-          deal.deal_name,
-          deal.deal_status,
-          deal.deal_stage,
-          deal.notes,
-          deal.expected_close_date,
-          deal.created_date
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase()
-
-        return id === normalizedQuery || clientId === normalizedQuery || text.includes(normalizedQuery)
-      })
-      return results
-    }
-
     try {
       const tokenHeader = apiToken ? { Authorization: `Bearer ${apiToken}` } : getAuthHeader()
       const headers = {
@@ -178,23 +157,14 @@ const DealsList = () => {
         }
 
         if (res.status === 403) {
-          console.warn('Search forbidden (403) - falling back to local search')
-          const results = localSearch(query)
-          setSearchResults(results)
-          if (results.length === 0) {
-            setError('No deals found matching that search.')
-          } else {
-            setSuccess(`${results.length} deal(s) found (local).`)
-          }
-          setError('⚠️ API Access Denied (403). Showing local results.')
+          setSearchResults([])
+          setError('API access denied for search.')
           setSearchLoading(false)
           return
         }
 
-        // other non-ok -> fallback to local search but show error
-        const results = localSearch(query)
-        setSearchResults(results)
-        setError(`Search failed: HTTP ${res.status}. Showing local results.`)
+        setSearchResults([])
+        setError(`Search failed: HTTP ${res.status}.`)
         setSearchLoading(false)
         return
       }
@@ -209,9 +179,8 @@ const DealsList = () => {
       }
     } catch (err) {
       console.error('Search API error:', err)
-      const results = localSearch(query)
-      setSearchResults(results)
-      setError(`Error searching deals: ${err.message || 'Unknown error'}. Showing local results.`)
+      setSearchResults([])
+      setError(`Error searching deals: ${err.message || 'Unknown error'}.`)
     } finally {
       setSearchLoading(false)
     }
@@ -233,16 +202,15 @@ const DealsList = () => {
     setSuccess('')
     setEditingDealId(dealId)
     setEditForm({
-      deal_status: deal.deal_status || '',
-      deal_stage: deal.deal_stage || '',
       notes: deal.notes || '',
-      deal_value: deal.deal_value ?? deal.dealValue ?? ''
+      start_date: deal.start_date || '',
+      end_date: deal.end_date || deal.close_date || deal.expected_close_date || ''
     })
   }
 
   const cancelEditDeal = () => {
     setEditingDealId(null)
-    setEditForm({ deal_status: '', deal_stage: '', notes: '', deal_value: '' })
+    setEditForm({ notes: '', start_date: '', end_date: '' })
   }
 
   const handleEditFormChange = (e) => {
@@ -271,14 +239,22 @@ const DealsList = () => {
       return
     }
 
-    // remove id fields from payload to avoid server rejecting updates containing identifiers
     const { id: _id, deal_id: _dealId, ...existingWithoutId } = existingDeal
     const payload = {
       ...existingWithoutId,
-      deal_status: editForm.deal_status,
-      deal_stage: editForm.deal_stage,
       notes: editForm.notes,
-      deal_value: editForm.deal_value
+      start_date: editForm.start_date,
+      end_date: editForm.end_date
+    }
+
+    const updateDealInList = (list, updatedDeal) =>
+      list.map((deal) => (getDealId(deal) === normalizedDealId ? { ...deal, ...updatedDeal } : deal))
+
+    const syncLocalStorage = (updatedDeal) => {
+      const localDeals = localStorage.getItem('deals_local_storage')
+      const dealList = localDeals ? JSON.parse(localDeals) : []
+      const updated = dealList.map((deal) => (getDealId(deal) === normalizedDealId ? { ...deal, ...updatedDeal } : deal))
+      localStorage.setItem('deals_local_storage', JSON.stringify(updated))
     }
 
     try {
@@ -289,12 +265,11 @@ const DealsList = () => {
         ...tokenHeader
       }
 
-      const endpoint = `https://asg-crm-production.up.railway.app/deals/${encodeURIComponent(dealId)}`
+      const endpoint = `https://asg-crm-production.up.railway.app/deals/${encodeURIComponent(normalizedDealId)}`
       console.log('Updating deal to:', endpoint)
       console.log('Headers:', headers)
       console.log('Payload:', payload)
 
-      // Try PUT first
       let res = await fetch(endpoint, {
         method: 'PUT',
         headers,
@@ -315,7 +290,6 @@ const DealsList = () => {
           msg = body || msg
         }
 
-        // If forbidden, try PATCH as a fallback
         if (res.status === 403) {
           console.warn('PUT returned 403, attempting PATCH fallback...')
           const patchRes = await fetch(endpoint, {
@@ -329,40 +303,28 @@ const DealsList = () => {
           console.log('Update (PATCH) response body:', patchBody)
 
           if (patchRes.ok) {
-                const updatedDeal = patchBody ? JSON.parse(patchBody) : payload
-            setDeals((prev) =>
-              prev.map((deal) => {
-                const idKey = deal.id ?? deal.deal_id
-                if (idKey !== dealId) return deal
-                return { ...deal, ...updatedDeal }
-              })
-            )
-            // Update localStorage
-            const localDeals = localStorage.getItem('deals_local_storage')
-            const dealList = localDeals ? JSON.parse(localDeals) : []
-            const updated = dealList.map((d) => (getDealId(d) === String(dealId) ? updatedDeal : d))
-            localStorage.setItem('deals_local_storage', JSON.stringify(updated))
+            const updatedDeal = patchBody ? JSON.parse(patchBody) : payload
+            setDeals((prev) => updateDealInList(prev, updatedDeal))
+            setSearchResults((prev) => updateDealInList(prev, updatedDeal))
+            syncLocalStorage(updatedDeal)
 
-            setSuccess(`✅ Deal ${dealId} updated successfully (PATCH).`)
+            setSuccess(`✅ Deal ${normalizedDealId} updated successfully (PATCH).`)
             setEditingDealId(null)
-            setEditForm({ deal_status: '', deal_stage: '', notes: '', deal_value: '' })
+            setEditForm({ notes: '', start_date: '', end_date: '' })
             setSaving(false)
             return
           }
 
-          // If PATCH also fails, fall back to local update
-          setDeals((prev) =>
-            prev.map((deal) => {
-              const idKey = deal.id ?? deal.deal_id
-              if (idKey !== dealId) return deal
-              return { ...deal, ...payload }
-            })
-          )
-          const localDeals = localStorage.getItem('deals_local_storage')
-          const dealList = localDeals ? JSON.parse(localDeals) : []
-          const updated = dealList.map((d) => (getDealId(d) === String(dealId) ? payload : d))
-          localStorage.setItem('deals_local_storage', JSON.stringify(updated))
-          setSuccess(`✅ Deal ${dealId} updated locally!`)
+          const locallyUpdatedDeal = {
+            ...existingDeal,
+            ...payload,
+            id: existingDeal.id ?? existingDeal.deal_id ?? normalizedDealId,
+            deal_id: existingDeal.deal_id ?? normalizedDealId
+          }
+          setDeals((prev) => updateDealInList(prev, locallyUpdatedDeal))
+          setSearchResults((prev) => updateDealInList(prev, locallyUpdatedDeal))
+          syncLocalStorage(locallyUpdatedDeal)
+          setSuccess(`✅ Deal ${normalizedDealId} updated locally!`)
           setError('⚠️ Saved locally - API access denied. Will sync when restored.')
           setEditingDealId(null)
           setSaving(false)
@@ -373,22 +335,13 @@ const DealsList = () => {
       }
 
       const updatedDeal = body ? JSON.parse(body) : payload
-      setDeals((prev) =>
-        prev.map((deal) => {
-          const idKey = deal.id ?? deal.deal_id
-          if (idKey !== dealId) return deal
-          return { ...deal, ...updatedDeal }
-        })
-      )
-      // Update localStorage
-      const localDeals = localStorage.getItem('deals_local_storage')
-      const dealList = localDeals ? JSON.parse(localDeals) : []
-      const updated = dealList.map((d) => (d.id === dealId || d.deal_id === dealId ? updatedDeal : d))
-      localStorage.setItem('deals_local_storage', JSON.stringify(updated))
+      setDeals((prev) => updateDealInList(prev, updatedDeal))
+      setSearchResults((prev) => updateDealInList(prev, updatedDeal))
+      syncLocalStorage(updatedDeal)
 
-      setSuccess(`✅ Deal ${dealId} updated successfully.`)
+      setSuccess(`✅ Deal ${normalizedDealId} updated successfully.`)
       setEditingDealId(null)
-      setEditForm({ deal_status: '', deal_stage: '', notes: '', deal_value: '' })
+      setEditForm({ notes: '', start_date: '', end_date: '' })
     } catch (err) {
       console.error('Update error:', err)
       setError(err.message || 'Error updating deal')
@@ -412,8 +365,19 @@ const DealsList = () => {
     setSuccess('')
     setDeletingDealId(dealId)
 
-    // find the deal object so we can include it in the DELETE request body
-    const existingDeal = deals.find((d) => getDealId(d) === String(dealId)) || null
+    const normalizedDealId = String(dealId)
+    const existingDeal =
+      deals.find((d) => getDealId(d) === normalizedDealId) ||
+      searchResults.find((d) => getDealId(d) === normalizedDealId) ||
+      null
+
+    const payload = existingDeal
+      ? {
+          ...existingDeal,
+          deal_id: normalizedDealId,
+          id: existingDeal.id ?? existingDeal.deal_id ?? normalizedDealId
+        }
+      : { deal_id: normalizedDealId }
 
     try {
       const tokenHeader = apiToken ? { Authorization: `Bearer ${apiToken}` } : getAuthHeader()
@@ -423,17 +387,16 @@ const DealsList = () => {
         ...tokenHeader
       }
 
-      const endpoint = `https://asg-crm-production.up.railway.app/deals/${encodeURIComponent(dealId)}`
+      const endpoint = `https://asg-crm-production.up.railway.app/deals/${encodeURIComponent(normalizedDealId)}`
       console.log('Deleting deal from:', endpoint)
       console.log('Headers:', headers)
+      console.log('Delete payload:', payload)
 
-      // Some servers accept a body on DELETE for audit/archive purposes.
-      // Send the full deal object in the body so the API can store/archive it at /deals/{deal_id}.
       const res = await fetch(endpoint, {
         method: 'DELETE',
         headers,
         credentials: 'include',
-        body: existingDeal ? JSON.stringify(existingDeal) : undefined
+        body: JSON.stringify(payload)
       })
 
       const body = await res.text()
@@ -442,22 +405,20 @@ const DealsList = () => {
 
       if (!res.ok) {
         if (res.status === 404 || res.status === 405) {
-          // Delete locally if API doesn't support delete
-          setDeals((prev) => prev.filter((deal) => deal.id !== dealId))
+          setDeals((prev) => prev.filter((deal) => getDealId(deal) !== normalizedDealId))
           const localDeals = localStorage.getItem('deals_local_storage')
           const dealList = localDeals ? JSON.parse(localDeals) : []
-          const updated = dealList.filter((d) => d.id !== dealId && d.deal_id !== dealId)
+          const updated = dealList.filter((d) => getDealId(d) !== normalizedDealId)
           localStorage.setItem('deals_local_storage', JSON.stringify(updated))
           setSuccess(`✅ Deal removed locally. Remote delete is not supported by the API.`)
           return
         }
 
         if (res.status === 403) {
-          // Delete locally on 403
-          setDeals((prev) => prev.filter((deal) => deal.id !== dealId))
+          setDeals((prev) => prev.filter((deal) => getDealId(deal) !== normalizedDealId))
           const localDeals = localStorage.getItem('deals_local_storage')
           const dealList = localDeals ? JSON.parse(localDeals) : []
-          const updated = dealList.filter((d) => d.id !== dealId && d.deal_id !== dealId)
+          const updated = dealList.filter((d) => getDealId(d) !== normalizedDealId)
           localStorage.setItem('deals_local_storage', JSON.stringify(updated))
           setSuccess(`✅ Deal removed locally!`)
           setError('⚠️ Deleted locally - API access denied. Will sync when restored.')
@@ -474,12 +435,12 @@ const DealsList = () => {
         throw new Error(msg)
       }
 
-      setDeals((prev) => prev.filter((deal) => deal.id !== dealId))
+      setDeals((prev) => prev.filter((deal) => getDealId(deal) !== normalizedDealId))
       const localDeals = localStorage.getItem('deals_local_storage')
       const dealList = localDeals ? JSON.parse(localDeals) : []
-      const updated = dealList.filter((d) => d.id !== dealId && d.deal_id !== dealId)
+      const updated = dealList.filter((d) => getDealId(d) !== normalizedDealId)
       localStorage.setItem('deals_local_storage', JSON.stringify(updated))
-      setSuccess(`✅ Deal ${dealId} deleted successfully.`)
+      setSuccess(`✅ Deal ${normalizedDealId} deleted successfully.`)
     } catch (err) {
       console.error('Delete error:', err)
       setError(err.message || 'Error deleting deal')
@@ -514,7 +475,7 @@ const DealsList = () => {
           <div className="flex gap-2">
             <input
               type="text"
-              placeholder="Search deals by name, status, stage, or notes..."
+              placeholder="Search deals"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
@@ -553,45 +514,32 @@ const DealsList = () => {
                     <div className="text-lg font-semibold text-gray-900 mb-3">{deal.deal_name || 'Unnamed Deal'}</div>
                     <div className="mt-2 grid gap-3 md:grid-cols-2">
                       <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Client ID</div>
-                        <div className="text-sm text-gray-900">{deal.client_id ?? 'N/A'}</div>
-                      </div>
-                      <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Deal Status</div>
-                        <div className="text-sm text-gray-900">{deal.deal_status || 'N/A'}</div>
-                      </div>
-                      <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Deal Value</div>
+                        <div className="text-xs uppercase tracking-wide text-gray-500">Start Date</div>
                         {editingDealId === dealId ? (
                           <input
-                            type="number"
-                            step="0.01"
-                            name="deal_value"
-                            value={editForm.deal_value}
+                            type="date"
+                            name="start_date"
+                            value={editForm.start_date}
                             onChange={handleEditFormChange}
                             className="w-full rounded-lg border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
                           />
                         ) : (
-                          <div className="text-sm text-gray-900">{deal.deal_value ? `$${parseFloat(deal.deal_value).toLocaleString()}` : 'N/A'}</div>
+                          <div className="text-sm text-gray-900">{deal.start_date || deal.expected_close_date || 'N/A'}</div>
                         )}
                       </div>
                       <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Deal Stage</div>
+                        <div className="text-xs uppercase tracking-wide text-gray-500">End Date</div>
                         {editingDealId === dealId ? (
                           <input
-                            type="text"
-                            name="deal_stage"
-                            value={editForm.deal_stage}
+                            type="date"
+                            name="end_date"
+                            value={editForm.end_date}
                             onChange={handleEditFormChange}
                             className="w-full rounded-lg border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
                           />
                         ) : (
-                          <div className="text-sm text-gray-900">{deal.deal_stage || 'N/A'}</div>
+                          <div className="text-sm text-gray-900">{deal.end_date || deal.close_date || deal.expected_close_date || 'N/A'}</div>
                         )}
-                      </div>
-                      <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Expected Close Date</div>
-                        <div className="text-sm text-gray-900">{deal.expected_close_date || 'N/A'}</div>
                       </div>
                       <div className="rounded-lg bg-gray-50 border border-gray-200 p-3 md:col-span-2">
                         <div className="text-xs uppercase tracking-wide text-gray-500">Notes</div>
@@ -676,59 +624,6 @@ const DealsList = () => {
                     <div className="text-xl font-semibold text-gray-900">{deal.deal_name || 'Unnamed Deal'}</div>
                   </div>
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <div className="rounded-lg bg-white border border-gray-200 p-3">
-                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Client ID</div>
-                      <div className="font-mono text-sm text-gray-900">{deal.client_id ?? 'N/A'}</div>
-                    </div>
-                    <div className="rounded-lg bg-white border border-gray-200 p-3">
-                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Deal Status</div>
-                      {editingDealId === dealId ? (
-                        <select
-                          name="deal_status"
-                          value={editForm.deal_status}
-                          onChange={handleEditFormChange}
-                          className="w-full rounded-lg border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
-                        >
-                          <option value="">Select status</option>
-                          <option value="Open">Open</option>
-                          <option value="In Progress">In Progress</option>
-                          <option value="Won">Won</option>
-                          <option value="Lost">Lost</option>
-                          <option value="On Hold">On Hold</option>
-                        </select>
-                      ) : (
-                        <div className="font-mono text-sm text-gray-900">{deal.deal_status || 'N/A'}</div>
-                      )}
-                    </div>
-                    <div className="rounded-lg bg-white border border-gray-200 p-3">
-                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Deal Value</div>
-                      {editingDealId === dealId ? (
-                        <input
-                          type="number"
-                          step="0.01"
-                          name="deal_value"
-                          value={editForm.deal_value}
-                          onChange={handleEditFormChange}
-                          className="w-full rounded-lg border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
-                        />
-                      ) : (
-                        <div className="font-mono text-sm text-gray-900">{deal.deal_value ? `$${parseFloat(deal.deal_value).toLocaleString()}` : 'N/A'}</div>
-                      )}
-                    </div>
-                    <div className="rounded-lg bg-white border border-gray-200 p-3">
-                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Deal Stage</div>
-                      {editingDealId === dealId ? (
-                        <input
-                          type="text"
-                          name="deal_stage"
-                          value={editForm.deal_stage}
-                          onChange={handleEditFormChange}
-                          className="w-full rounded-lg border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
-                        />
-                      ) : (
-                        <div className="font-mono text-sm text-gray-900">{deal.deal_stage || 'N/A'}</div>
-                      )}
-                    </div>
                     <div className="rounded-lg bg-white border border-gray-200 p-3 md:col-span-2">
                       <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Notes</div>
                       {editingDealId === dealId ? (
@@ -744,12 +639,32 @@ const DealsList = () => {
                       )}
                     </div>
                     <div className="rounded-lg bg-white border border-gray-200 p-3">
-                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Expected Close Date</div>
-                      <div className="font-mono text-sm text-gray-900">{deal.expected_close_date || 'N/A'}</div>
+                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Start Date</div>
+                      {editingDealId === dealId ? (
+                        <input
+                          type="date"
+                          name="start_date"
+                          value={editForm.start_date}
+                          onChange={handleEditFormChange}
+                          className="w-full rounded-lg border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                        />
+                      ) : (
+                        <div className="font-mono text-sm text-gray-900">{deal.start_date || deal.expected_close_date || 'N/A'}</div>
+                      )}
                     </div>
                     <div className="rounded-lg bg-white border border-gray-200 p-3">
-                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">Created Date</div>
-                      <div className="font-mono text-sm text-gray-900">{deal.created_date || 'N/A'}</div>
+                      <div className="text-xs font-semibold uppercase text-gray-500 mb-1">End Date</div>
+                      {editingDealId === dealId ? (
+                        <input
+                          type="date"
+                          name="end_date"
+                          value={editForm.end_date}
+                          onChange={handleEditFormChange}
+                          className="w-full rounded-lg border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+                        />
+                      ) : (
+                        <div className="font-mono text-sm text-gray-900">{deal.end_date || deal.close_date || deal.expected_close_date || 'N/A'}</div>
+                      )}
                     </div>
                   </div>
 
